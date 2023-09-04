@@ -18,4 +18,4 @@ and provided as a part of the vercel runtime.
 If your rust code is part of a client package (running in the browser via wasm or running
 some kind of custom client application) then you will need to obtain an authentication
 token. This can be done by creating a route in your server that will supply short-lived
-authentication tokens to authorized users.
+authentication tokens to authorized users.  The crate documentation contains an example.

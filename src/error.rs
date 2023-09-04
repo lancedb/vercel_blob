@@ -1,12 +1,14 @@
+//! Error handling utilities for the crate
 use thiserror::Error;
 
 use reqwest::Error as ReqwestError;
 
+/// All errors raised by this crate will be instances of VercelBlobError
 #[derive(Error, Debug)]
 pub enum VercelBlobError {
     #[error("No authentication token. Expected environment variable BLOB_READ_WRITE_TOKEN to contain a token")]
     NotAuthenticated(),
-    #[error("HTTP error: {0}")]
+    #[error("Internal HTTP error: {0}")]
     HttpError(#[from] ReqwestError),
     #[error("HTTP Response error ({0}): {1}")]
     ResponseError(u16, String),
