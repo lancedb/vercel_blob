@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use serial_test::serial;
 use vercel_blob::auth::EnvTokenProvider;
 use vercel_blob::auth::TokenProvider;
 use vercel_blob::client::DownloadCommandOptions;
+use vercel_blob::client::HeadCommandOptions;
 use vercel_blob::client::ListCommandOptions;
 use vercel_blob::client::PutCommandOptions;
 use vercel_blob::client::VercelBlobApi;
@@ -238,6 +240,35 @@ async fn test_put_without_random_suffix() {
 #[tokio::test]
 #[serial]
 #[ignore]
+async fn test_put_cache_control() {
+    let client = VercelBlobClient::new_external(PROVIDER.clone());
+
+    delete_all_files(&client).await;
+
+    let blob = client
+        .put(
+            "vercel_blob_unittest/a.json",
+            vec![0_u8, 1_u8, 2_u8],
+            PutCommandOptions {
+                cache_control_max_age: Some(4200),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let head_result = client
+        .head(&blob.url, HeadCommandOptions::default())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(head_result.cache_control.contains("max-age=4200"));
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 async fn test_put_content_type() {
     let client = VercelBlobClient::new_external(PROVIDER.clone());
 
@@ -377,4 +408,39 @@ async fn test_partial_download() {
     // If the start of the request is past the end of the file it's an error
     let file_bytes = partial_get(&client, &uploaded.url, 100..500).await;
     assert_true!(file_bytes.is_err());
+}
+
+#[derive(Debug)]
+struct HardCodedTokenProvider {
+    token: String,
+}
+
+#[async_trait]
+impl TokenProvider for HardCodedTokenProvider {
+    async fn get_token(
+        &self,
+        _operation: &str,
+        _pathname: Option<&str>,
+    ) -> std::result::Result<String, VercelBlobError> {
+        Ok(self.token.clone())
+    }
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_invalid_token() {
+    env::set_var("BLOB_READ_WRITE_TOKEN", "xyz");
+    let bad_provider = Arc::new(HardCodedTokenProvider {
+        token: "foo".to_string(),
+    });
+    let client = VercelBlobClient::new_external(bad_provider);
+    let err = client
+        .list(ListCommandOptions::default())
+        .await
+        .unwrap_err();
+    match err {
+        VercelBlobError::Forbidden() => {}
+        _ => panic!("Expected Forbidden error when passed a bad token"),
+    }
 }

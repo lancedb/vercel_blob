@@ -10,7 +10,8 @@
 //!
 //! [`VercelBlobClient`]: crate::client::VercelBlobClient
 //!
-//! ```
+//! ```ignore
+//!
 //! let client = VercelBlobClient::new();
 //!
 //! let list_result = client.list(Default::default()).await.unwrap();
@@ -27,7 +28,8 @@
 //!
 //! [quickstart guide]: https://vercel.com/docs/storage/vercel-blob/quickstart#browser-uploads
 //!
-//! ```
+//! ```ignore
+//! use async_trait::async_trait;
 //! use reqwest::Client;
 //! use serde::Deserialize;
 //! use serde::Serialize;
