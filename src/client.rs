@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
-use reqwest::{Body, Client, RequestBuilder, StatusCode};
+use reqwest::{Body, Client, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
     error::{Result, VercelBlobError},
 };
 
-const BLOB_API_VERSION: u32 = 2;
+const BLOB_API_VERSION: u32 = 4;
 static GLOBAL_CLIENT: Lazy<Client> = Lazy::new(Client::new);
 
 pub struct VercelBlobClient {
@@ -24,6 +24,17 @@ pub struct VercelBlobClient {
     base_url: String,
     /// The API version of the client
     api_version: String,
+}
+
+#[derive(Deserialize)]
+struct BlobApiErrorDetail {
+    code: String,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BlobApiError {
+    error: BlobApiErrorDetail,
 }
 
 /// A client for interacting with the Vercel Blob Store
@@ -81,6 +92,31 @@ impl VercelBlobClient {
     ) -> Result<RequestBuilder> {
         let token = get_token(self.token_provider.as_deref(), operation, pathname).await?;
         Ok(request.header("authorization", format!("Bearer {}", token)))
+    }
+
+    async fn handle_error(response: Response) -> VercelBlobError {
+        let status = response.status();
+        if status.as_u16() >= 500 {
+            return VercelBlobError::unknown_error(status);
+        }
+        let error = response.json::<BlobApiError>().await;
+        if error.is_err() {
+            return VercelBlobError::unknown_error(status);
+        }
+        let error = error.unwrap();
+        match error.error.code.as_str() {
+            "store_suspended" => VercelBlobError::StoreSuspended(),
+            "forbidden" => VercelBlobError::Forbidden(),
+            "not_found" => VercelBlobError::BlobNotFound(),
+            "store_not_found" => VercelBlobError::StoreNotFound(),
+            "bad_request" => VercelBlobError::BadRequest(
+                error
+                    .error
+                    .message
+                    .unwrap_or_else(|| "unknown details".to_string()),
+            ),
+            _ => VercelBlobError::unknown_error(status),
+        }
     }
 }
 
@@ -231,10 +267,10 @@ impl VercelBlobApi for VercelBlobClient {
         let rsp = request.send().await?;
 
         if rsp.status() != StatusCode::OK {
-            return Err(VercelBlobError::from_http(rsp.status()));
+            Err(Self::handle_error(rsp).await)
+        } else {
+            Ok(rsp.json::<ListBlobResult>().await?)
         }
-
-        Ok(rsp.json::<ListBlobResult>().await?)
     }
 
     async fn put(
@@ -271,11 +307,11 @@ impl VercelBlobApi for VercelBlobClient {
 
         let response = request.send().await?;
         if response.status() != StatusCode::OK {
-            return Err(VercelBlobError::from_http(response.status()));
+            Err(Self::handle_error(response).await)
+        } else {
+            let rsp_obj = response.json::<PutBlobResult>().await?;
+            Ok(rsp_obj)
         }
-
-        let rsp_obj = response.json::<PutBlobResult>().await?;
-        Ok(rsp_obj)
     }
 
     async fn head(
@@ -295,22 +331,15 @@ impl VercelBlobApi for VercelBlobClient {
 
         let response = request.send().await?;
 
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        if response.status() == StatusCode::BAD_REQUEST {
-            return Err(VercelBlobError::InvalidInput(format!(
-                "{:?}",
-                response.bytes().await?
-            )));
-        }
-
         if response.status() != StatusCode::OK {
-            return Err(VercelBlobError::from_http(response.status()));
+            let err = Self::handle_error(response).await;
+            match err {
+                VercelBlobError::BlobNotFound() => Ok(None),
+                _ => Err(err),
+            }
+        } else {
+            Ok(Some(response.json::<HeadBlobResult>().await?))
         }
-
-        Ok(Some(response.json::<HeadBlobResult>().await?))
     }
 
     async fn del(&self, url: &str, _options: DelCommandOptions) -> Result<()> {
@@ -330,10 +359,10 @@ impl VercelBlobApi for VercelBlobClient {
         let response = request.send().await?;
 
         if response.status() != StatusCode::OK {
-            return Err(VercelBlobError::from_http(response.status()));
+            Err(Self::handle_error(response).await)
+        } else {
+            Ok(())
         }
-
-        Ok(())
     }
 
     async fn download(&self, url: &str, options: DownloadCommandOptions) -> Result<Bytes> {
@@ -359,10 +388,10 @@ impl VercelBlobApi for VercelBlobClient {
         let response = request.send().await.unwrap();
 
         if response.status() != StatusCode::OK && response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(VercelBlobError::from_http(response.status()));
+            Err(Self::handle_error(response).await)
+        } else {
+            Ok(response.bytes().await.unwrap())
         }
-
-        Ok(response.bytes().await.unwrap())
     }
 }
 
@@ -430,6 +459,9 @@ pub struct HeadBlobResult {
     /// The content disposition of the blob
     #[serde(alias = "contentDisposition")]
     pub content_disposition: String,
+    /// The cache settings for the blob
+    #[serde(alias = "cacheControl")]
+    pub cache_control: String,
 }
 
 /// Options for the head operation
@@ -468,6 +500,8 @@ mod tests {
     use mockito::{Matcher, Mock, ServerGuard};
 
     use super::*;
+
+    const EXAMPLE_CACHE_CONTROL: &'static str = "public, max-age=31536000, s-maxage=300";
 
     #[derive(Debug, Serialize)]
     struct TemplateContext {
@@ -668,6 +702,7 @@ mod tests {
                 pathname: "somefile.txt".to_string(),
                 content_type: "text/plain".to_string(),
                 content_disposition: "inline".to_string(),
+                cache_control: EXAMPLE_CACHE_CONTROL.to_string(),
             })
         })
         .await;
@@ -695,6 +730,7 @@ mod tests {
 
         let result = maybe_result.unwrap();
         assert_eq!(result.pathname, "somefile.txt");
+        assert_eq!(result.cache_control, EXAMPLE_CACHE_CONTROL);
 
         mock.assert_async().await;
     }
